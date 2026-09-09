@@ -143,7 +143,60 @@ TEST_F(CacheFilterConfigTest, KeyIncludesAdditionalHeaders) {
                                       {":authority", "svc.local"},
                                       {"x-tenant", "acme"}};
   const std::string key = cfg->buildKey(hdrs);
-  EXPECT_NE(key.find("x-tenant=acme"), std::string::npos);
+  EXPECT_NE(key.find("acme"), std::string::npos);
+
+  // A request without the header must produce a different key.
+  Http::TestRequestHeaderMapImpl hdrs_no_tenant{
+      {":method", "GET"}, {":path", "/api"}, {":authority", "svc.local"}};
+  EXPECT_NE(key, cfg->buildKey(hdrs_no_tenant));
+}
+
+TEST_F(CacheFilterConfigTest, SeparatorCharactersInValuesDoNotCollide) {
+  KeyConfig kc;
+  kc.include_host = true;
+  kc.include_path = true;
+  auto cfg = makeConfig(kc);
+
+  // Under a naive "<host>|<path>|" concatenation both of these produce
+  // "example.com||/x|". Length-prefixed components must keep them distinct.
+  Http::TestRequestHeaderMapImpl a{
+      {":method", "GET"}, {":path", "/x"}, {":authority", "example.com|"}};
+  Http::TestRequestHeaderMapImpl b{
+      {":method", "GET"}, {":path", "|/x"}, {":authority", "example.com"}};
+  EXPECT_NE(cfg->buildKey(a), cfg->buildKey(b));
+}
+
+TEST_F(CacheFilterConfigTest, AbsentComponentsKeepPositions) {
+  KeyConfig kc;
+  kc.include_host = false;
+  kc.include_path = false;
+  kc.additional_headers.push_back("x-a");
+  kc.additional_headers.push_back("x-b");
+  auto cfg = makeConfig(kc);
+
+  // The same value in different header positions must not collide.
+  Http::TestRequestHeaderMapImpl a{
+      {":method", "GET"}, {":path", "/"}, {":authority", "h"}, {"x-a", "v"}};
+  Http::TestRequestHeaderMapImpl b{
+      {":method", "GET"}, {":path", "/"}, {":authority", "h"}, {"x-b", "v"}};
+  EXPECT_NE(cfg->buildKey(a), cfg->buildKey(b));
+}
+
+TEST_F(CacheFilterConfigTest, SchemeIsPartOfKey) {
+  KeyConfig kc;
+  kc.include_host = true;
+  kc.include_path = true;
+  auto cfg = makeConfig(kc);
+
+  Http::TestRequestHeaderMapImpl http_req{{":method", "GET"},
+                                          {":path", "/x"},
+                                          {":authority", "example.com"},
+                                          {":scheme", "http"}};
+  Http::TestRequestHeaderMapImpl https_req{{":method", "GET"},
+                                           {":path", "/x"},
+                                           {":authority", "example.com"},
+                                           {":scheme", "https"}};
+  EXPECT_NE(cfg->buildKey(http_req), cfg->buildKey(https_req));
 }
 
 // ---- CacheFilter integration-style tests ----
@@ -204,6 +257,54 @@ TEST_F(CacheFilterTest, CacheMissThenHit) {
 
   Http::TestRequestHeaderMapImpl req2{{":method", "GET"},
                                       {":path", "/resource"},
+                                      {":authority", "example.com"}};
+  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration, filter2->decodeHeaders(req2, true));
+}
+
+TEST_F(CacheFilterTest, ReplayStripsFramingAndHopByHopHeaders) {
+  // --- First request: store a response carrying framing and hop-by-hop
+  // headers that must not be replayed with a cached body. ---
+  Http::TestRequestHeaderMapImpl req1{{":method", "GET"},
+                                      {":path", "/asset"},
+                                      {":authority", "example.com"}};
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->decodeHeaders(req1, true));
+
+  Http::TestResponseHeaderMapImpl resp_hdrs{{":status", "200"},
+                                            {"content-type", "text/plain"},
+                                            {"content-length", "999"},
+                                            {"transfer-encoding", "chunked"},
+                                            {"connection", "keep-alive"},
+                                            {"keep-alive", "timeout=5"},
+                                            {"upgrade", "h2c"},
+                                            {"etag", "\"abc\""}};
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(resp_hdrs, false));
+
+  Buffer::OwnedImpl body("cached-content");
+  EXPECT_EQ(Http::FilterDataStatus::Continue, filter_->encodeData(body, true));
+
+  // --- Second request: cache hit; the replayed headers must keep end-to-end
+  // headers but drop framing and hop-by-hop ones. ---
+  auto filter2 = std::make_shared<CacheFilter>(config_);
+  NiceMock<Http::MockStreamDecoderFilterCallbacks> cb2;
+  filter2->setDecoderFilterCallbacks(cb2);
+  filter2->setEncoderFilterCallbacks(encoder_callbacks_);
+
+  EXPECT_CALL(cb2, sendLocalReply(Http::Code::OK, _, _, _, _))
+      .WillOnce(testing::WithArg<2>(
+          testing::Invoke([](std::function<void(Http::ResponseHeaderMap&)> modify_headers) {
+            Http::TestResponseHeaderMapImpl reply{{":status", "200"}};
+            modify_headers(reply);
+            EXPECT_EQ(reply.get_("content-type"), "text/plain");
+            EXPECT_EQ(reply.get_("etag"), "\"abc\"");
+            EXPECT_TRUE(reply.get(Http::LowerCaseString("content-length")).empty());
+            EXPECT_TRUE(reply.get(Http::LowerCaseString("transfer-encoding")).empty());
+            EXPECT_TRUE(reply.get(Http::LowerCaseString("connection")).empty());
+            EXPECT_TRUE(reply.get(Http::LowerCaseString("keep-alive")).empty());
+            EXPECT_TRUE(reply.get(Http::LowerCaseString("upgrade")).empty());
+          })));
+
+  Http::TestRequestHeaderMapImpl req2{{":method", "GET"},
+                                      {":path", "/asset"},
                                       {":authority", "example.com"}};
   EXPECT_EQ(Http::FilterHeadersStatus::StopIteration, filter2->decodeHeaders(req2, true));
 }

@@ -6,6 +6,7 @@
 #include "envoy/http/filter.h"
 
 #include "source/common/common/logger.h"
+#include "source/common/http/headers.h"
 #include "source/common/http/utility.h"
 #include "source/extensions/filters/http/ringcache/ring_buffer_cache.h"
 
@@ -32,19 +33,23 @@ public:
       : key_config_(std::move(key_config)), store_(std::move(store)),
         max_cacheable_size_(max_cacheable_size) {}
 
+  // Builds an injective cache key. Every component is emitted as
+  // "<length>:<bytes>;" so a component value containing separator characters
+  // cannot be confused with a component boundary, and absent or excluded
+  // components are emitted as the empty component "0:;" so that each
+  // component's position in the key is fixed. The components are, in order:
+  // scheme, host, path, then one component per configured additional header.
   std::string buildKey(const Http::RequestHeaderMap& headers) const {
     std::string key;
-    if (key_config_.include_host && headers.Host()) {
-      absl::StrAppend(&key, headers.getHostValue(), "|");
-    }
-    if (key_config_.include_path && headers.Path()) {
-      absl::StrAppend(&key, headers.getPathValue(), "|");
-    }
+    const auto append_component = [&key](absl::string_view value) {
+      absl::StrAppend(&key, value.size(), ":", value, ";");
+    };
+    append_component(headers.getSchemeValue());
+    append_component(key_config_.include_host ? headers.getHostValue() : absl::string_view());
+    append_component(key_config_.include_path ? headers.getPathValue() : absl::string_view());
     for (const auto& h : key_config_.additional_headers) {
       const auto entry = headers.get(Http::LowerCaseString(h));
-      if (!entry.empty()) {
-        absl::StrAppend(&key, h, "=", entry[0]->value().getStringView(), "|");
-      }
+      append_component(entry.empty() ? absl::string_view() : entry[0]->value().getStringView());
     }
     return key;
   }
@@ -136,6 +141,7 @@ public:
       return Http::FilterHeadersStatus::Continue;
     }
     response_headers_ = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(headers);
+    sanitizeStoredHeaders(*response_headers_);
     return Http::FilterHeadersStatus::Continue;
   }
 
@@ -190,6 +196,21 @@ public:
   }
 
 private:
+  // Removes headers that must not be replayed with a cached body: framing
+  // headers describe the original wire encoding (sendLocalReply computes its
+  // own content-length for the replayed body), and hop-by-hop headers describe
+  // the original connection, not the cached response.
+  static void sanitizeStoredHeaders(Http::ResponseHeaderMap& headers) {
+    const auto& names = Http::Headers::get();
+    headers.remove(names.ContentLength);
+    headers.remove(names.TransferEncoding);
+    headers.remove(names.Connection);
+    headers.remove(names.KeepAlive);
+    headers.remove(names.ProxyConnection);
+    headers.remove(names.ProxyAuthenticate);
+    headers.remove(names.Upgrade);
+  }
+
   std::shared_ptr<CacheFilterConfig> config_;
   Http::StreamDecoderFilterCallbacks* decoder_callbacks_{nullptr};
   Http::StreamEncoderFilterCallbacks* encoder_callbacks_{nullptr};
