@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <deque>
 #include <memory>
 #include <string>
@@ -21,6 +22,7 @@ namespace RingCache {
 struct CachedResponse {
   Http::ResponseHeaderMapPtr headers;
   Buffer::OwnedImpl body;
+  // Full accounted footprint: body length + headers byteSize() + key length.
   size_t total_size{0};
 };
 
@@ -52,25 +54,31 @@ public:
   // Returns false (and drops the entry) if it exceeds the partition capacity.
   // The body slices are moved in (zero-copy from the caller's buffer).
   bool put(const std::string& key, Http::ResponseHeaderMapPtr headers, Buffer::Instance& body) {
-    const size_t entry_size = body.length();
+    // Account for the entry's full footprint — body, headers, and key — so
+    // header-heavy or empty-body entries cannot blow past the partition
+    // budget (body-only accounting left headers unbounded and let zero-byte
+    // entries accumulate without ever triggering eviction).
+    const size_t entry_size = body.length() + headers->byteSize() + key.size();
     if (entry_size > max_bytes_) {
       return false;
     }
 
     absl::WriterMutexLock lock(&mu_);
 
-    // Evict stale entries in insertion order until there is room.
-    while (current_bytes_ + entry_size > max_bytes_ && !order_.empty()) {
-      evictOldest();
-    }
-
-    // Overwrite any existing entry for the same key before inserting.
+    // Remove any existing entry for the same key before making room, so its
+    // stale size is not counted by the eviction loop — otherwise updating a
+    // key could needlessly evict unrelated entries.
     auto existing = lookup_.find(key);
     if (existing != lookup_.end()) {
       current_bytes_ -= existing->second->total_size;
       lookup_.erase(existing);
       // Remove from order_ as well (O(n) but infrequent; simplifies eviction).
       order_.erase(std::remove(order_.begin(), order_.end(), key), order_.end());
+    }
+
+    // Evict stale entries in insertion order until there is room.
+    while (current_bytes_ + entry_size > max_bytes_ && !order_.empty()) {
+      evictOldest();
     }
 
     auto cached = std::make_shared<CachedResponse>();

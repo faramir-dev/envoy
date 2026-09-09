@@ -32,6 +32,12 @@ protected:
     buf.add(data);
     return buf;
   }
+
+  // Mirrors the accounting in RingBufferPartition::put(): entry footprint is
+  // body + headers byteSize + key length (headers here are always ":status".)
+  static size_t entrySize(absl::string_view key, absl::string_view body) {
+    return body.size() + makeHeaders("200")->byteSize() + key.size();
+  }
 };
 
 TEST_F(RingBufferPartitionTest, MissOnEmpty) {
@@ -54,8 +60,10 @@ TEST_F(RingBufferPartitionTest, PutAndGet) {
 }
 
 TEST_F(RingBufferPartitionTest, EvictsOldestWhenFull) {
-  // Partition holds 5 bytes, each entry is 2 bytes.
-  RingBufferPartition p(5);
+  // Size the partition to hold exactly two entries; a third insert must
+  // evict the oldest. Entry size = body + headers + key.
+  const size_t entry_size = entrySize("k1", "ab");
+  RingBufferPartition p(2 * entry_size);
 
   auto b1 = makeBody("ab");
   auto b2 = makeBody("cd");
@@ -63,7 +71,6 @@ TEST_F(RingBufferPartitionTest, EvictsOldestWhenFull) {
 
   p.put("k1", makeHeaders("200"), b1);
   p.put("k2", makeHeaders("200"), b2);
-  // Now 4 bytes used; inserting 2 more bytes requires evicting k1.
   p.put("k3", makeHeaders("200"), b3);
 
   Http::ResponseHeaderMapPtr h;
@@ -94,6 +101,61 @@ TEST_F(RingBufferPartitionTest, UpdateExistingKey) {
   Buffer::OwnedImpl b;
   ASSERT_TRUE(p.get("key", h, b));
   EXPECT_EQ(b.toString(), "second");
+}
+
+TEST_F(RingBufferPartitionTest, SizeAccountingIncludesHeadersAndKey) {
+  // The body alone fits, but body + headers + key exceeds capacity, so the
+  // entry must be rejected.
+  const size_t entry_size = entrySize("k", "ab");
+  RingBufferPartition p(entry_size - 1);
+  auto body = makeBody("ab");
+  EXPECT_FALSE(p.put("k", makeHeaders("200"), body));
+
+  Http::ResponseHeaderMapPtr h;
+  Buffer::OwnedImpl b;
+  EXPECT_FALSE(p.get("k", h, b));
+}
+
+TEST_F(RingBufferPartitionTest, EmptyBodyEntriesStillConsumeBudget) {
+  // Zero-length bodies must still count (headers + key), so filling the
+  // partition with them triggers eviction instead of growing unboundedly.
+  const size_t entry_size = entrySize("k1", "");
+  RingBufferPartition p(2 * entry_size);
+
+  auto b1 = makeBody("");
+  auto b2 = makeBody("");
+  auto b3 = makeBody("");
+  p.put("k1", makeHeaders("200"), b1);
+  p.put("k2", makeHeaders("200"), b2);
+  p.put("k3", makeHeaders("200"), b3);
+
+  Http::ResponseHeaderMapPtr h;
+  Buffer::OwnedImpl b;
+  EXPECT_FALSE(p.get("k1", h, b)); // evicted
+  EXPECT_TRUE(p.get("k2", h, b));
+  EXPECT_TRUE(p.get("k3", h, b));
+}
+
+TEST_F(RingBufferPartitionTest, UpdatingKeyDoesNotEvictOtherEntries) {
+  // Partition sized to hold exactly ka and kb. Re-inserting kb (same size)
+  // must reclaim kb's old footprint before the eviction loop runs; counting
+  // the stale copy would wrongly evict ka.
+  const size_t entry_size = entrySize("ka", "ab");
+  RingBufferPartition p(2 * entry_size);
+
+  auto b1 = makeBody("ab");
+  auto b2 = makeBody("cd");
+  auto b2_new = makeBody("ef");
+  p.put("ka", makeHeaders("200"), b1);
+  p.put("kb", makeHeaders("200"), b2);
+  p.put("kb", makeHeaders("200"), b2_new);
+
+  Http::ResponseHeaderMapPtr h;
+  Buffer::OwnedImpl b;
+  EXPECT_TRUE(p.get("ka", h, b)) << "update of kb must not evict ka";
+  Buffer::OwnedImpl b_kb;
+  ASSERT_TRUE(p.get("kb", h, b_kb));
+  EXPECT_EQ(b_kb.toString(), "ef");
 }
 
 // ---- CacheFilterConfig key-building tests ----
