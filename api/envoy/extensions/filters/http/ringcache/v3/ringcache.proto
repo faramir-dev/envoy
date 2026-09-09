@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package envoy.extensions.filters.http.ringcache.v3;
+
+import "google/protobuf/wrappers.proto";
+
+import "udpa/annotations/status.proto";
+import "validate/validate.proto";
+
+option java_package = "io.envoyproxy.envoy.extensions.filters.http.ringcache.v3";
+option java_outer_classname = "RingCacheProto";
+option java_multiple_files = true;
+option go_package = "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ringcache/v3;ringcachev3";
+option (udpa.annotations.file_status).package_version_status = ACTIVE;
+
+// [#protodoc-title: Ring Buffer HTTP Cache Filter]
+// [#extension: envoy.filters.http.ringcache]
+
+// Configuration for the ring-buffer in-memory HTTP response cache filter.
+// Only HTTP GET requests that receive a 200 OK response are cached. Subsequent
+// identical requests are served from memory without forwarding to upstream.
+// [#next-free-field: 5]
+message RingCacheConfig {
+  // Controls which request attributes form the cache key.
+  message KeyConfig {
+    // When true, the ``Host`` header is excluded from the cache key.
+    // Default: false (Host is included in the key).
+    bool exclude_host = 1;
+
+    // When true, the request path (URL) is excluded from the cache key.
+    // Default: false (path is included in the key).
+    bool exclude_path = 2;
+
+    // Names of additional request headers whose values are appended to the key.
+    repeated string additional_headers = 3;
+  }
+
+  // Number of independent ring-buffer partitions. Requests are sharded across
+  // partitions by a hash of the cache key to reduce mutex contention on
+  // multi-threaded workers. Must be >= 1. Defaults to 64 when not set.
+  google.protobuf.UInt32Value num_partitions = 1 [(validate.rules).uint32 = {gte: 1}];
+
+  // Maximum bytes stored per partition. When a partition fills up the oldest
+  // entry is evicted (FIFO). Must be >= 1. Defaults to 8 MiB when not set.
+  google.protobuf.UInt64Value partition_max_bytes = 2 [(validate.rules).uint64 = {gte: 1}];
+
+  // Upper bound on the response body size that will be cached. Streaming
+  // responses whose accumulated body exceeds this limit are forwarded without
+  // caching (OOM / watermark guard). Must be >= 1. Defaults to 1 MiB when
+  // not set.
+  google.protobuf.UInt64Value max_cacheable_body_bytes = 3 [(validate.rules).uint64 = {gte: 1}];
+
+  // Controls which request attributes form the cache key. When absent, the
+  // Host header and path are both included with no additional headers.
+  KeyConfig key_config = 4;
+}

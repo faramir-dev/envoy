@@ -405,6 +405,13 @@ envoy.filters.http.cache_v2:
   status: wip
   type_urls:
   - envoy.extensions.filters.http.cache_v2.v3.CacheV2Config
+envoy.filters.http.ringcache:
+  categories:
+  - envoy.filters.http
+  security_posture: unknown
+  status: alpha
+  type_urls:
+  - envoy.extensions.filters.http.ringcache.v3.RingCacheConfig
 envoy.filters.http.cdn_loop:
   categories:
   - envoy.filters.http
