@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package envoy.extensions.filters.http.ringcache.v3;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/wrappers.proto";
 
 import "udpa/annotations/status.proto";
@@ -19,7 +20,7 @@ option (udpa.annotations.file_status).package_version_status = ACTIVE;
 // Configuration for the ring-buffer in-memory HTTP response cache filter.
 // Only HTTP GET requests that receive a 200 OK response are cached. Subsequent
 // identical requests are served from memory without forwarding to upstream.
-// [#next-free-field: 5]
+// [#next-free-field: 6]
 message RingCacheConfig {
   // Controls which request attributes form the cache key.
   message KeyConfig {
@@ -53,4 +54,9 @@ message RingCacheConfig {
   // Controls which request attributes form the cache key. When absent, the
   // Host header and path are both included with no additional headers.
   KeyConfig key_config = 4;
+
+  // Time-to-live for cache entries. An entry older than this is treated as a
+  // miss and lazily removed on the next lookup. When unset or zero, entries
+  // never expire by time and are only removed by capacity eviction (FIFO).
+  google.protobuf.Duration ttl = 5;
 }

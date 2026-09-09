@@ -22,8 +22,13 @@ envoy_cc_library(
     ],
     deps = [
         "//envoy/buffer:buffer_interface",
+        "//envoy/common:time_interface",
         "//envoy/http:filter_interface",
         "//envoy/http:header_map_interface",
+        "//envoy/singleton:instance_interface",
+        "//envoy/stats:scope_interface",
+        "//envoy/stats:stats_interface",
+        "//envoy/stats:stats_macros",
         "//source/common/buffer:buffer_lib",
         "//source/common/common:logger_lib",
         "//source/common/http:headers_lib",
@@ -31,6 +36,7 @@ envoy_cc_library(
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/types:optional",
     ],
 )
 
@@ -41,6 +47,8 @@ envoy_cc_extension(
     deps = [
         ":ringcache_filter_lib",
         "//envoy/registry",
+        "//envoy/singleton:manager_interface",
+        "//source/common/protobuf:utility_lib",
         "//source/extensions/filters/http/common:factory_base_lib",
         "@envoy_api//envoy/extensions/filters/http/ringcache/v3:pkg_cc_proto",
     ],

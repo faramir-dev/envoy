@@ -31,9 +31,10 @@ struct KeyConfig {
 class CacheFilterConfig {
 public:
   CacheFilterConfig(KeyConfig key_config, std::shared_ptr<SharedCacheStore> store,
-                    size_t max_cacheable_size)
+                    size_t max_cacheable_size,
+                    std::shared_ptr<RingCacheStoreRegistry> store_registry = nullptr)
       : key_config_(std::move(key_config)), store_(std::move(store)),
-        max_cacheable_size_(max_cacheable_size) {}
+        store_registry_(std::move(store_registry)), max_cacheable_size_(max_cacheable_size) {}
 
   // Builds an injective cache key. Every component is emitted as
   // "<length>:<bytes>;" so a component value containing separator characters
@@ -62,6 +63,9 @@ public:
 private:
   KeyConfig key_config_;
   std::shared_ptr<SharedCacheStore> store_;
+  // Pins the singleton store registry so the shared store (and every other
+  // store in the registry) survives LDS updates while any config is alive.
+  std::shared_ptr<RingCacheStoreRegistry> store_registry_;
   size_t max_cacheable_size_;
 };
 
@@ -107,8 +111,15 @@ public:
     Http::ResponseHeaderMapPtr cached_headers;
     Buffer::OwnedImpl cached_body;
 
-    if (!skip_lookup &&
-        config_->store().getPartition(cache_key_).get(cache_key_, cached_headers, cached_body)) {
+    const bool hit =
+        !skip_lookup &&
+        config_->store().getPartition(cache_key_).get(cache_key_, cached_headers, cached_body);
+    if (!skip_lookup) {
+      auto& stats = config_->store().stats();
+      hit ? stats.hit_.inc() : stats.miss_.inc();
+    }
+
+    if (hit) {
       ENVOY_LOG(debug, "ringcache: hit for key '{}'", cache_key_);
 
       // Materialise the body as a string; sendLocalReply is synchronous so

@@ -1,7 +1,15 @@
+#include "envoy/extensions/filters/http/ringcache/v3/ringcache.pb.h"
+
+#include "source/common/protobuf/message_validator_impl.h"
+#include "source/common/stats/isolated_store_impl.h"
 #include "source/extensions/filters/http/ringcache/cache_filter.h"
+#include "source/extensions/filters/http/ringcache/config.h"
 #include "source/extensions/filters/http/ringcache/ring_buffer_cache.h"
 
 #include "test/mocks/http/mocks.h"
+#include "test/mocks/server/server_factory_context.h"
+#include "test/test_common/simulated_time_system.h"
+#include "test/test_common/thread_factory_for_test.h"
 #include "test/test_common/utility.h"
 
 #include "absl/strings/str_cat.h"
@@ -11,6 +19,7 @@
 using testing::_;
 using testing::NiceMock;
 using testing::Return;
+using testing::SaveArg;
 
 namespace Envoy {
 namespace Extensions {
@@ -38,23 +47,32 @@ protected:
   static size_t entrySize(absl::string_view key, absl::string_view body) {
     return body.size() + makeHeaders("200")->byteSize() + key.size();
   }
+
+  std::unique_ptr<RingBufferPartition>
+  makePartition(size_t max_bytes, absl::optional<std::chrono::milliseconds> ttl = absl::nullopt) {
+    return std::make_unique<RingBufferPartition>(max_bytes, time_system_, ttl, stats_);
+  }
+
+  Stats::IsolatedStoreImpl stats_store_;
+  RingCacheStats stats_{RingCacheStats::generate(*stats_store_.rootScope())};
+  Event::SimulatedTimeSystem time_system_;
 };
 
 TEST_F(RingBufferPartitionTest, MissOnEmpty) {
-  RingBufferPartition p(1024);
+  auto p = makePartition(1024);
   Http::ResponseHeaderMapPtr h;
   Buffer::OwnedImpl b;
-  EXPECT_FALSE(p.get("key", h, b));
+  EXPECT_FALSE(p->get("key", h, b));
 }
 
 TEST_F(RingBufferPartitionTest, PutAndGet) {
-  RingBufferPartition p(1024);
+  auto p = makePartition(1024);
   auto body = makeBody("hello");
-  p.put("k1", makeHeaders("200"), body);
+  p->put("k1", makeHeaders("200"), body);
 
   Http::ResponseHeaderMapPtr out_headers;
   Buffer::OwnedImpl out_body;
-  ASSERT_TRUE(p.get("k1", out_headers, out_body));
+  ASSERT_TRUE(p->get("k1", out_headers, out_body));
   EXPECT_EQ(out_headers->getStatusValue(), "200");
   EXPECT_EQ(out_body.toString(), "hello");
 }
@@ -63,43 +81,43 @@ TEST_F(RingBufferPartitionTest, EvictsOldestWhenFull) {
   // Size the partition to hold exactly two entries; a third insert must
   // evict the oldest. Entry size = body + headers + key.
   const size_t entry_size = entrySize("k1", "ab");
-  RingBufferPartition p(2 * entry_size);
+  auto p = makePartition(2 * entry_size);
 
   auto b1 = makeBody("ab");
   auto b2 = makeBody("cd");
   auto b3 = makeBody("ef");
 
-  p.put("k1", makeHeaders("200"), b1);
-  p.put("k2", makeHeaders("200"), b2);
-  p.put("k3", makeHeaders("200"), b3);
+  p->put("k1", makeHeaders("200"), b1);
+  p->put("k2", makeHeaders("200"), b2);
+  p->put("k3", makeHeaders("200"), b3);
 
   Http::ResponseHeaderMapPtr h;
   Buffer::OwnedImpl b;
-  EXPECT_FALSE(p.get("k1", h, b)); // evicted
-  EXPECT_TRUE(p.get("k2", h, b));
-  EXPECT_TRUE(p.get("k3", h, b));
+  EXPECT_FALSE(p->get("k1", h, b)); // evicted
+  EXPECT_TRUE(p->get("k2", h, b));
+  EXPECT_TRUE(p->get("k3", h, b));
 }
 
 TEST_F(RingBufferPartitionTest, DropsEntryExceedingCapacity) {
-  RingBufferPartition p(3);
+  auto p = makePartition(3);
   auto body = makeBody("toolong");
-  EXPECT_FALSE(p.put("k", makeHeaders("200"), body));
+  EXPECT_FALSE(p->put("k", makeHeaders("200"), body));
 
   Http::ResponseHeaderMapPtr h;
   Buffer::OwnedImpl b;
-  EXPECT_FALSE(p.get("k", h, b));
+  EXPECT_FALSE(p->get("k", h, b));
 }
 
 TEST_F(RingBufferPartitionTest, UpdateExistingKey) {
-  RingBufferPartition p(1024);
+  auto p = makePartition(1024);
   auto b1 = makeBody("first");
   auto b2 = makeBody("second");
-  p.put("key", makeHeaders("200"), b1);
-  p.put("key", makeHeaders("200"), b2);
+  p->put("key", makeHeaders("200"), b1);
+  p->put("key", makeHeaders("200"), b2);
 
   Http::ResponseHeaderMapPtr h;
   Buffer::OwnedImpl b;
-  ASSERT_TRUE(p.get("key", h, b));
+  ASSERT_TRUE(p->get("key", h, b));
   EXPECT_EQ(b.toString(), "second");
 }
 
@@ -107,33 +125,33 @@ TEST_F(RingBufferPartitionTest, SizeAccountingIncludesHeadersAndKey) {
   // The body alone fits, but body + headers + key exceeds capacity, so the
   // entry must be rejected.
   const size_t entry_size = entrySize("k", "ab");
-  RingBufferPartition p(entry_size - 1);
+  auto p = makePartition(entry_size - 1);
   auto body = makeBody("ab");
-  EXPECT_FALSE(p.put("k", makeHeaders("200"), body));
+  EXPECT_FALSE(p->put("k", makeHeaders("200"), body));
 
   Http::ResponseHeaderMapPtr h;
   Buffer::OwnedImpl b;
-  EXPECT_FALSE(p.get("k", h, b));
+  EXPECT_FALSE(p->get("k", h, b));
 }
 
 TEST_F(RingBufferPartitionTest, EmptyBodyEntriesStillConsumeBudget) {
   // Zero-length bodies must still count (headers + key), so filling the
   // partition with them triggers eviction instead of growing unboundedly.
   const size_t entry_size = entrySize("k1", "");
-  RingBufferPartition p(2 * entry_size);
+  auto p = makePartition(2 * entry_size);
 
   auto b1 = makeBody("");
   auto b2 = makeBody("");
   auto b3 = makeBody("");
-  p.put("k1", makeHeaders("200"), b1);
-  p.put("k2", makeHeaders("200"), b2);
-  p.put("k3", makeHeaders("200"), b3);
+  p->put("k1", makeHeaders("200"), b1);
+  p->put("k2", makeHeaders("200"), b2);
+  p->put("k3", makeHeaders("200"), b3);
 
   Http::ResponseHeaderMapPtr h;
   Buffer::OwnedImpl b;
-  EXPECT_FALSE(p.get("k1", h, b)); // evicted
-  EXPECT_TRUE(p.get("k2", h, b));
-  EXPECT_TRUE(p.get("k3", h, b));
+  EXPECT_FALSE(p->get("k1", h, b)); // evicted
+  EXPECT_TRUE(p->get("k2", h, b));
+  EXPECT_TRUE(p->get("k3", h, b));
 }
 
 TEST_F(RingBufferPartitionTest, UpdatingKeyDoesNotEvictOtherEntries) {
@@ -141,31 +159,150 @@ TEST_F(RingBufferPartitionTest, UpdatingKeyDoesNotEvictOtherEntries) {
   // must reclaim kb's old footprint before the eviction loop runs; counting
   // the stale copy would wrongly evict ka.
   const size_t entry_size = entrySize("ka", "ab");
-  RingBufferPartition p(2 * entry_size);
+  auto p = makePartition(2 * entry_size);
 
   auto b1 = makeBody("ab");
   auto b2 = makeBody("cd");
   auto b2_new = makeBody("ef");
-  p.put("ka", makeHeaders("200"), b1);
-  p.put("kb", makeHeaders("200"), b2);
-  p.put("kb", makeHeaders("200"), b2_new);
+  p->put("ka", makeHeaders("200"), b1);
+  p->put("kb", makeHeaders("200"), b2);
+  p->put("kb", makeHeaders("200"), b2_new);
 
   Http::ResponseHeaderMapPtr h;
   Buffer::OwnedImpl b;
-  EXPECT_TRUE(p.get("ka", h, b)) << "update of kb must not evict ka";
+  EXPECT_TRUE(p->get("ka", h, b)) << "update of kb must not evict ka";
   Buffer::OwnedImpl b_kb;
-  ASSERT_TRUE(p.get("kb", h, b_kb));
+  ASSERT_TRUE(p->get("kb", h, b_kb));
   EXPECT_EQ(b_kb.toString(), "ef");
+}
+
+TEST_F(RingBufferPartitionTest, TtlExpiresEntries) {
+  auto p = makePartition(4096, std::chrono::milliseconds(5000));
+  auto body = makeBody("hello");
+  p->put("k", makeHeaders("200"), body);
+
+  Http::ResponseHeaderMapPtr h;
+  Buffer::OwnedImpl b1;
+  ASSERT_TRUE(p->get("k", h, b1));
+  EXPECT_EQ(stats_.expired_.value(), 0);
+
+  time_system_.setMonotonicTime(time_system_.monotonicTime() + std::chrono::milliseconds(5001));
+  Buffer::OwnedImpl b2;
+  EXPECT_FALSE(p->get("k", h, b2));
+  EXPECT_EQ(stats_.expired_.value(), 1);
+
+  // The expired entry was erased (not just hidden): a repeat lookup must not
+  // count a second expiry.
+  Buffer::OwnedImpl b3;
+  EXPECT_FALSE(p->get("k", h, b3));
+  EXPECT_EQ(stats_.expired_.value(), 1);
+}
+
+TEST_F(RingBufferPartitionTest, NoTtlNeverExpires) {
+  auto p = makePartition(4096); // no TTL
+  auto body = makeBody("hello");
+  p->put("k", makeHeaders("200"), body);
+
+  time_system_.setMonotonicTime(time_system_.monotonicTime() + std::chrono::hours(24 * 365));
+  Http::ResponseHeaderMapPtr h;
+  Buffer::OwnedImpl b;
+  EXPECT_TRUE(p->get("k", h, b));
+}
+
+TEST_F(RingBufferPartitionTest, StatsCountInsertsEvictionsAndRejections) {
+  const size_t entry_size = entrySize("k1", "ab");
+  auto p = makePartition(2 * entry_size);
+
+  auto b1 = makeBody("ab");
+  auto b2 = makeBody("cd");
+  auto b3 = makeBody("ef");
+  p->put("k1", makeHeaders("200"), b1);
+  p->put("k2", makeHeaders("200"), b2);
+  p->put("k3", makeHeaders("200"), b3); // evicts k1
+  EXPECT_EQ(stats_.insert_.value(), 3);
+  EXPECT_EQ(stats_.eviction_.value(), 1);
+
+  auto oversized = makeBody(std::string(3 * entry_size, 'x'));
+  EXPECT_FALSE(p->put("big", makeHeaders("200"), oversized));
+  EXPECT_EQ(stats_.insert_rejected_.value(), 1);
+}
+
+// ---- SharedCacheStore / RingCacheStoreRegistry tests ----
+
+class SharedCacheStoreTest : public testing::Test {
+protected:
+  std::shared_ptr<SharedCacheStore> makeStore(size_t partitions, size_t max_bytes) {
+    return std::make_shared<SharedCacheStore>(partitions, max_bytes, absl::nullopt, time_system_,
+                                              *stats_store_.rootScope());
+  }
+
+  Stats::IsolatedStoreImpl stats_store_;
+  Event::SimulatedTimeSystem time_system_;
+};
+
+TEST_F(SharedCacheStoreTest, SameKeyAlwaysMapsToSamePartition) {
+  auto store = makeStore(8, 4096);
+  EXPECT_EQ(&store->getPartition("some-key"), &store->getPartition("some-key"));
+  EXPECT_EQ(&store->getPartition(""), &store->getPartition(""));
+}
+
+TEST_F(SharedCacheStoreTest, RegistrySharesStoresByConfigKey) {
+  RingCacheStoreRegistry registry;
+  int factory_calls = 0;
+  const auto factory = [&]() {
+    ++factory_calls;
+    return makeStore(4, 4096);
+  };
+
+  auto s1 = registry.getOrCreate("geometry-a", factory);
+  auto s2 = registry.getOrCreate("geometry-a", factory);
+  auto s3 = registry.getOrCreate("geometry-b", factory);
+
+  EXPECT_EQ(s1, s2);
+  EXPECT_NE(s1, s3);
+  EXPECT_EQ(factory_calls, 2);
+}
+
+TEST_F(SharedCacheStoreTest, ConcurrentPutsAndGets) {
+  auto store = makeStore(4, 32 * 1024);
+  auto& thread_factory = Thread::threadFactoryForTest();
+
+  std::vector<Thread::ThreadPtr> threads;
+  for (int t = 0; t < 4; ++t) {
+    threads.push_back(thread_factory.createThread([&store, t]() {
+      for (int i = 0; i < 200; ++i) {
+        // Overlapping key space across threads to force lock contention.
+        const std::string key = absl::StrCat("key-", (t + i) % 10);
+        auto headers = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(
+            Http::TestResponseHeaderMapImpl{{":status", "200"}});
+        Buffer::OwnedImpl body("payload");
+        store->getPartition(key).put(key, std::move(headers), body);
+
+        Http::ResponseHeaderMapPtr out_headers;
+        Buffer::OwnedImpl out_body;
+        if (store->getPartition(key).get(key, out_headers, out_body)) {
+          EXPECT_EQ(out_body.toString(), "payload");
+        }
+      }
+    }));
+  }
+  for (auto& thread : threads) {
+    thread->join();
+  }
 }
 
 // ---- CacheFilterConfig key-building tests ----
 
 class CacheFilterConfigTest : public testing::Test {
 protected:
-  static std::shared_ptr<CacheFilterConfig> makeConfig(KeyConfig kc) {
-    auto store = std::make_shared<SharedCacheStore>(4, 4096);
+  std::shared_ptr<CacheFilterConfig> makeConfig(KeyConfig kc) {
+    auto store = std::make_shared<SharedCacheStore>(4, 4096, absl::nullopt, time_system_,
+                                                    *stats_store_.rootScope());
     return std::make_shared<CacheFilterConfig>(std::move(kc), std::move(store), 1024);
   }
+
+  Stats::IsolatedStoreImpl stats_store_;
+  Event::SimulatedTimeSystem time_system_;
 };
 
 TEST_F(CacheFilterConfigTest, KeyIncludesHostAndPath) {
@@ -270,8 +407,9 @@ public:
     KeyConfig kc;
     kc.include_host = true;
     kc.include_path = true;
-    auto store = std::make_shared<SharedCacheStore>(4, 64 * 1024);
-    config_ = std::make_shared<CacheFilterConfig>(std::move(kc), std::move(store), 32 * 1024);
+    store_ = std::make_shared<SharedCacheStore>(4, 64 * 1024, absl::nullopt, time_system_,
+                                                *stats_store_.rootScope());
+    config_ = std::make_shared<CacheFilterConfig>(std::move(kc), store_, 32 * 1024);
     filter_ = std::make_shared<CacheFilter>(config_);
     filter_->setDecoderFilterCallbacks(decoder_callbacks_);
     filter_->setEncoderFilterCallbacks(encoder_callbacks_);
@@ -311,6 +449,9 @@ public:
 
   NiceMock<Http::MockStreamDecoderFilterCallbacks> decoder_callbacks_;
   NiceMock<Http::MockStreamEncoderFilterCallbacks> encoder_callbacks_;
+  Stats::IsolatedStoreImpl stats_store_;
+  Event::SimulatedTimeSystem time_system_;
+  std::shared_ptr<SharedCacheStore> store_;
   std::shared_ptr<CacheFilterConfig> config_;
   std::shared_ptr<CacheFilter> filter_;
 };
@@ -551,6 +692,121 @@ TEST_F(CacheFilterTest, TrailerTerminatedResponseNotStored) {
   runMissAndStore(req, Http::TestResponseHeaderMapImpl{{":status", "200"}}, "partial-body",
                   /*end_with_trailers=*/true);
   EXPECT_FALSE(lookupHits(req));
+}
+
+// ---- Stats tests ----
+
+TEST_F(CacheFilterTest, CountsHitsMissesAndInserts) {
+  Http::TestRequestHeaderMapImpl req{
+      {":method", "GET"}, {":path", "/stats"}, {":authority", "host"}};
+  runMissAndStore(req, Http::TestResponseHeaderMapImpl{{":status", "200"}}, "content");
+  EXPECT_EQ(store_->stats().miss_.value(), 1);
+  EXPECT_EQ(store_->stats().insert_.value(), 1);
+  EXPECT_EQ(store_->stats().hit_.value(), 0);
+
+  ASSERT_TRUE(lookupHits(req));
+  EXPECT_EQ(store_->stats().hit_.value(), 1);
+  EXPECT_EQ(store_->stats().miss_.value(), 1);
+}
+
+TEST_F(CacheFilterTest, BypassedLookupsCountNeitherHitNorMiss) {
+  Http::TestRequestHeaderMapImpl authed{{":method", "GET"},
+                                        {":path", "/auth"},
+                                        {":authority", "host"},
+                                        {"authorization", "Bearer tok"}};
+  EXPECT_FALSE(lookupHits(authed));
+  EXPECT_EQ(store_->stats().hit_.value(), 0);
+  EXPECT_EQ(store_->stats().miss_.value(), 0);
+}
+
+// ---- Factory / config translation tests ----
+
+class RingCacheFactoryTest : public testing::Test {
+protected:
+  Http::StreamFilterSharedPtr
+  createFilter(const envoy::extensions::filters::http::ringcache::v3::RingCacheConfig& proto) {
+    Server::Configuration::ExtraFactoryContext extra{
+        ProtobufMessage::getStrictValidationVisitor(), stats_prefix_};
+    auto cb_or = factory_.createHttpFilterFactoryFromProto(proto, context_, extra);
+    EXPECT_TRUE(cb_or.ok());
+    Http::StreamFilterSharedPtr filter;
+    NiceMock<Http::MockFilterChainFactoryCallbacks> callbacks;
+    EXPECT_CALL(callbacks, addStreamFilter(_)).WillOnce(SaveArg<0>(&filter));
+    (*cb_or)(callbacks);
+    return filter;
+  }
+
+  // Drives a full miss+store cycle through the given filter.
+  void storeThrough(const Http::StreamFilterSharedPtr& filter, const std::string& path) {
+    NiceMock<Http::MockStreamDecoderFilterCallbacks> decoder_cb;
+    filter->setDecoderFilterCallbacks(decoder_cb);
+    filter->setEncoderFilterCallbacks(encoder_callbacks_);
+    Http::TestRequestHeaderMapImpl req{
+        {":method", "GET"}, {":path", path}, {":authority", "host"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter->decodeHeaders(req, true));
+    Http::TestResponseHeaderMapImpl resp{{":status", "200"}};
+    filter->encodeHeaders(resp, false);
+    Buffer::OwnedImpl body("shared-content");
+    filter->encodeData(body, true);
+  }
+
+  bool hitsThrough(const Http::StreamFilterSharedPtr& filter, const std::string& path) {
+    NiceMock<Http::MockStreamDecoderFilterCallbacks> decoder_cb;
+    filter->setDecoderFilterCallbacks(decoder_cb);
+    filter->setEncoderFilterCallbacks(encoder_callbacks_);
+    bool hit = false;
+    EXPECT_CALL(decoder_cb, sendLocalReply(_, _, _, _, _))
+        .Times(testing::AnyNumber())
+        .WillRepeatedly(testing::InvokeWithoutArgs([&hit]() { hit = true; }));
+    Http::TestRequestHeaderMapImpl req{
+        {":method", "GET"}, {":path", path}, {":authority", "host"}};
+    filter->decodeHeaders(req, true);
+    return hit;
+  }
+
+  RingCacheFilterFactory factory_;
+  NiceMock<Server::Configuration::MockServerFactoryContext> context_;
+  NiceMock<Http::MockStreamEncoderFilterCallbacks> encoder_callbacks_;
+  const std::string stats_prefix_{"test."};
+};
+
+TEST_F(RingCacheFactoryTest, CreatesFilterFromFullConfig) {
+  envoy::extensions::filters::http::ringcache::v3::RingCacheConfig proto;
+  proto.mutable_num_partitions()->set_value(4);
+  proto.mutable_partition_max_bytes()->set_value(4096);
+  proto.mutable_max_cacheable_body_bytes()->set_value(1024);
+  proto.mutable_ttl()->set_seconds(60);
+  proto.mutable_key_config()->set_exclude_host(true);
+  proto.mutable_key_config()->add_additional_headers("x-tenant");
+
+  EXPECT_NE(createFilter(proto), nullptr);
+}
+
+TEST_F(RingCacheFactoryTest, IdenticalConfigsShareTheCacheAcrossFactoryCalls) {
+  // Two factory invocations with the same proto, as happens on an LDS update
+  // or when the same config appears in two filter chains.
+  envoy::extensions::filters::http::ringcache::v3::RingCacheConfig proto;
+  auto filter1 = createFilter(proto);
+  auto filter2 = createFilter(proto);
+  ASSERT_NE(filter1, nullptr);
+  ASSERT_NE(filter2, nullptr);
+
+  storeThrough(filter1, "/shared");
+  EXPECT_TRUE(hitsThrough(filter2, "/shared"));
+}
+
+TEST_F(RingCacheFactoryTest, DifferentGeometriesGetSeparateCaches) {
+  envoy::extensions::filters::http::ringcache::v3::RingCacheConfig proto_a;
+  envoy::extensions::filters::http::ringcache::v3::RingCacheConfig proto_b;
+  proto_b.mutable_partition_max_bytes()->set_value(4096);
+
+  auto filter1 = createFilter(proto_a);
+  auto filter2 = createFilter(proto_b);
+  ASSERT_NE(filter1, nullptr);
+  ASSERT_NE(filter2, nullptr);
+
+  storeThrough(filter1, "/separate");
+  EXPECT_FALSE(hitsThrough(filter2, "/separate"));
 }
 
 } // namespace RingCache
