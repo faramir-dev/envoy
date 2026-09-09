@@ -4,6 +4,7 @@
 #include "test/mocks/http/mocks.h"
 #include "test/test_common/utility.h"
 
+#include "absl/strings/str_cat.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
@@ -214,6 +215,38 @@ public:
     filter_->setEncoderFilterCallbacks(encoder_callbacks_);
   }
 
+  // Runs a full miss+store cycle through a fresh filter instance.
+  void runMissAndStore(Http::TestRequestHeaderMapImpl req, Http::TestResponseHeaderMapImpl resp,
+                       const std::string& body_str, bool end_with_trailers = false) {
+    auto f = std::make_shared<CacheFilter>(config_);
+    NiceMock<Http::MockStreamDecoderFilterCallbacks> cb;
+    f->setDecoderFilterCallbacks(cb);
+    f->setEncoderFilterCallbacks(encoder_callbacks_);
+    f->decodeHeaders(req, true);
+    f->encodeHeaders(resp, false);
+    Buffer::OwnedImpl body(body_str);
+    f->encodeData(body, !end_with_trailers);
+    if (end_with_trailers) {
+      Http::TestResponseTrailerMapImpl trailers{{"grpc-status", "0"}};
+      f->encodeTrailers(trailers);
+    }
+  }
+
+  // Sends the request through a fresh filter and reports whether it was
+  // served from cache (i.e. sendLocalReply was called).
+  bool lookupHits(Http::TestRequestHeaderMapImpl req) {
+    auto f = std::make_shared<CacheFilter>(config_);
+    NiceMock<Http::MockStreamDecoderFilterCallbacks> cb;
+    f->setDecoderFilterCallbacks(cb);
+    f->setEncoderFilterCallbacks(encoder_callbacks_);
+    bool hit = false;
+    EXPECT_CALL(cb, sendLocalReply(_, _, _, _, _))
+        .Times(testing::AnyNumber())
+        .WillRepeatedly(testing::InvokeWithoutArgs([&hit]() { hit = true; }));
+    f->decodeHeaders(req, true);
+    return hit;
+  }
+
   NiceMock<Http::MockStreamDecoderFilterCallbacks> decoder_callbacks_;
   NiceMock<Http::MockStreamEncoderFilterCallbacks> encoder_callbacks_;
   std::shared_ptr<CacheFilterConfig> config_;
@@ -360,6 +393,102 @@ TEST_F(CacheFilterTest, Non200ResponseNotCached) {
                                       {":path", "/err"},
                                       {":authority", "host"}};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter2->decodeHeaders(req2, true));
+}
+
+// ---- Cacheability guard tests ----
+
+TEST_F(CacheFilterTest, AuthorizationRequestNeverServedFromCache) {
+  Http::TestRequestHeaderMapImpl plain{
+      {":method", "GET"}, {":path", "/doc"}, {":authority", "host"}};
+  runMissAndStore(plain, Http::TestResponseHeaderMapImpl{{":status", "200"}}, "public-content");
+  ASSERT_TRUE(lookupHits(plain));
+
+  Http::TestRequestHeaderMapImpl authed{{":method", "GET"},
+                                        {":path", "/doc"},
+                                        {":authority", "host"},
+                                        {"authorization", "Bearer tok"}};
+  EXPECT_FALSE(lookupHits(authed));
+}
+
+TEST_F(CacheFilterTest, AuthorizationResponseNeverStored) {
+  Http::TestRequestHeaderMapImpl authed{{":method", "GET"},
+                                        {":path", "/secret"},
+                                        {":authority", "host"},
+                                        {"authorization", "Bearer tok"}};
+  runMissAndStore(authed, Http::TestResponseHeaderMapImpl{{":status", "200"}}, "user-a-secret");
+
+  // The same key without credentials must still miss.
+  Http::TestRequestHeaderMapImpl plain{
+      {":method", "GET"}, {":path", "/secret"}, {":authority", "host"}};
+  EXPECT_FALSE(lookupHits(plain));
+}
+
+TEST_F(CacheFilterTest, RequestNoCacheSkipsLookup) {
+  Http::TestRequestHeaderMapImpl plain{
+      {":method", "GET"}, {":path", "/fresh"}, {":authority", "host"}};
+  runMissAndStore(plain, Http::TestResponseHeaderMapImpl{{":status", "200"}}, "content");
+  ASSERT_TRUE(lookupHits(plain));
+
+  Http::TestRequestHeaderMapImpl no_cache{{":method", "GET"},
+                                          {":path", "/fresh"},
+                                          {":authority", "host"},
+                                          {"cache-control", "no-cache"}};
+  EXPECT_FALSE(lookupHits(no_cache));
+}
+
+TEST_F(CacheFilterTest, RequestNoStoreSkipsStore) {
+  Http::TestRequestHeaderMapImpl no_store{{":method", "GET"},
+                                          {":path", "/nostore"},
+                                          {":authority", "host"},
+                                          {"cache-control", "no-store"}};
+  runMissAndStore(no_store, Http::TestResponseHeaderMapImpl{{":status", "200"}}, "content");
+
+  Http::TestRequestHeaderMapImpl plain{
+      {":method", "GET"}, {":path", "/nostore"}, {":authority", "host"}};
+  EXPECT_FALSE(lookupHits(plain));
+}
+
+TEST_F(CacheFilterTest, ResponseCacheControlForbidsStoring) {
+  const std::vector<std::string> directives = {"no-store", "private", "no-cache",
+                                               "max-age=60, private"};
+  for (const auto& directive : directives) {
+    const std::string path = absl::StrCat("/cc/", directive);
+    Http::TestRequestHeaderMapImpl req{
+        {":method", "GET"}, {":path", path}, {":authority", "host"}};
+    runMissAndStore(
+        req,
+        Http::TestResponseHeaderMapImpl{{":status", "200"}, {"cache-control", directive}},
+        "content");
+    EXPECT_FALSE(lookupHits(req)) << "directive: " << directive;
+  }
+}
+
+TEST_F(CacheFilterTest, ResponseSetCookieNotStored) {
+  Http::TestRequestHeaderMapImpl req{
+      {":method", "GET"}, {":path", "/cookie"}, {":authority", "host"}};
+  runMissAndStore(req,
+                  Http::TestResponseHeaderMapImpl{{":status", "200"},
+                                                  {"set-cookie", "session=abc; HttpOnly"}},
+                  "per-user-content");
+  EXPECT_FALSE(lookupHits(req));
+}
+
+TEST_F(CacheFilterTest, ResponseVaryNotStored) {
+  Http::TestRequestHeaderMapImpl req{
+      {":method", "GET"}, {":path", "/vary"}, {":authority", "host"}};
+  runMissAndStore(
+      req,
+      Http::TestResponseHeaderMapImpl{{":status", "200"}, {"vary", "accept-encoding"}},
+      "gzipped-content");
+  EXPECT_FALSE(lookupHits(req));
+}
+
+TEST_F(CacheFilterTest, TrailerTerminatedResponseNotStored) {
+  Http::TestRequestHeaderMapImpl req{
+      {":method", "GET"}, {":path", "/grpcish"}, {":authority", "host"}};
+  runMissAndStore(req, Http::TestResponseHeaderMapImpl{{":status", "200"}}, "partial-body",
+                  /*end_with_trailers=*/true);
+  EXPECT_FALSE(lookupHits(req));
 }
 
 } // namespace RingCache

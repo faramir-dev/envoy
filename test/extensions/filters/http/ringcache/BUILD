@@ -20,5 +20,6 @@ envoy_extension_cc_test(
         "//source/extensions/filters/http/ringcache:ringcache_filter_lib",
         "//test/mocks/http:http_mocks",
         "//test/test_common:utility_lib",
+        "@abseil-cpp//absl/strings",
     ],
 )

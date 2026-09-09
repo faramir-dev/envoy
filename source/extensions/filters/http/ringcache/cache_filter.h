@@ -10,6 +10,8 @@
 #include "source/common/http/utility.h"
 #include "source/extensions/filters/http/ringcache/ring_buffer_cache.h"
 
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 
 namespace Envoy {
@@ -81,11 +83,32 @@ public:
       return Http::FilterHeadersStatus::Continue;
     }
 
+    // RFC 9111 §3.5: a shared cache must not reuse or store a response to a
+    // request that carries Authorization credentials. Bypass the cache
+    // entirely so one client's authorized response is never served to another.
+    if (!headers.get(Http::CustomHeaders::get().Authorization).empty()) {
+      is_cacheable_ = false;
+      return Http::FilterHeadersStatus::Continue;
+    }
+
+    // Honor request cache-control: "no-cache" forbids serving from cache
+    // without revalidation (which this filter cannot do), "no-store" forbids
+    // storing the response. Conservative substring match on the directives.
+    bool skip_lookup = false;
+    bool skip_store = false;
+    const auto request_cc = headers.get(Http::CustomHeaders::get().CacheControl);
+    for (size_t i = 0; i < request_cc.size(); ++i) {
+      const std::string value = absl::AsciiStrToLower(request_cc[i]->value().getStringView());
+      skip_lookup |= absl::StrContains(value, "no-cache");
+      skip_store |= absl::StrContains(value, "no-store");
+    }
+
     cache_key_ = config_->buildKey(headers);
     Http::ResponseHeaderMapPtr cached_headers;
     Buffer::OwnedImpl cached_body;
 
-    if (config_->store().getPartition(cache_key_).get(cache_key_, cached_headers, cached_body)) {
+    if (!skip_lookup &&
+        config_->store().getPartition(cache_key_).get(cache_key_, cached_headers, cached_body)) {
       ENVOY_LOG(debug, "ringcache: hit for key '{}'", cache_key_);
 
       // Materialise the body as a string; sendLocalReply is synchronous so
@@ -112,7 +135,7 @@ public:
     }
 
     ENVOY_LOG(debug, "ringcache: miss for key '{}'", cache_key_);
-    is_cacheable_ = true;
+    is_cacheable_ = !skip_store;
     return Http::FilterHeadersStatus::Continue;
   }
 
@@ -137,6 +160,11 @@ public:
     }
     // Only cache 200 OK; also skip if there is no body (nothing to buffer).
     if (headers.getStatusValue() != "200" || end_stream) {
+      is_cacheable_ = false;
+      return Http::FilterHeadersStatus::Continue;
+    }
+    if (!responseAllowsCaching(headers)) {
+      ENVOY_LOG(debug, "ringcache: response for key '{}' is not cacheable", cache_key_);
       is_cacheable_ = false;
       return Http::FilterHeadersStatus::Continue;
     }
@@ -171,10 +199,14 @@ public:
   }
 
   Http::FilterTrailersStatus encodeTrailers(Http::ResponseTrailerMap&) override {
-    // If the response ended via trailers, flush whatever we buffered.
-    if (is_cacheable_ && response_headers_ != nullptr && accumulated_body_.length() > 0) {
-      config_->store().getPartition(cache_key_).put(cache_key_, std::move(response_headers_),
-                                                    accumulated_body_);
+    // A cached replay cannot include trailers, so a response that ends with
+    // trailers would be replayed as a materially different response (e.g.
+    // gRPC status lives in trailers). Drop the buffered data instead of
+    // storing it.
+    if (is_cacheable_) {
+      is_cacheable_ = false;
+      response_headers_.reset();
+      accumulated_body_.drain(accumulated_body_.length());
     }
     return Http::FilterTrailersStatus::Continue;
   }
@@ -196,6 +228,30 @@ public:
   }
 
 private:
+  // RFC 9111 response-side guards: never store responses marked no-store,
+  // private, or no-cache (this filter cannot revalidate), responses that set
+  // cookies (almost always per-user state), or responses with a Vary header
+  // (this filter does not implement variant matching, so storing them could
+  // serve the wrong representation). Directive checks are conservative
+  // substring matches, erring on the side of not caching.
+  static bool responseAllowsCaching(const Http::ResponseHeaderMap& headers) {
+    const auto cc = headers.get(Http::CustomHeaders::get().CacheControl);
+    for (size_t i = 0; i < cc.size(); ++i) {
+      const std::string value = absl::AsciiStrToLower(cc[i]->value().getStringView());
+      if (absl::StrContains(value, "no-store") || absl::StrContains(value, "private") ||
+          absl::StrContains(value, "no-cache")) {
+        return false;
+      }
+    }
+    if (!headers.get(Http::Headers::get().SetCookie).empty()) {
+      return false;
+    }
+    if (!headers.get(Http::CustomHeaders::get().Vary).empty()) {
+      return false;
+    }
+    return true;
+  }
+
   // Removes headers that must not be replayed with a cached body: framing
   // headers describe the original wire encoding (sendLocalReply computes its
   // own content-length for the replayed body), and hop-by-hop headers describe
