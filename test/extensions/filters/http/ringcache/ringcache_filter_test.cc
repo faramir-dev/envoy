@@ -32,7 +32,7 @@ class RingBufferPartitionTest : public testing::Test {
 protected:
   static Http::ResponseHeaderMapPtr makeHeaders(absl::string_view status) {
     auto hdrs = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(
-        Http::TestResponseHeaderMapImpl{{":status", status}});
+        Http::TestResponseHeaderMapImpl{{":status", std::string(status)}});
     return hdrs;
   }
 

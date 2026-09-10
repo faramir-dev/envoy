@@ -31,6 +31,7 @@ envoy_cc_library(
         "//envoy/stats:stats_macros",
         "//source/common/buffer:buffer_lib",
         "//source/common/common:logger_lib",
+        "//source/common/http:header_map_lib",
         "//source/common/http:headers_lib",
         "//source/common/http:utility_lib",
         "@abseil-cpp//absl/container:flat_hash_map",

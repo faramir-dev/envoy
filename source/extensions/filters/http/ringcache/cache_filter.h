@@ -6,6 +6,7 @@
 #include "envoy/http/filter.h"
 
 #include "source/common/common/logger.h"
+#include "source/common/http/header_map_impl.h"
 #include "source/common/http/headers.h"
 #include "source/common/http/utility.h"
 #include "source/extensions/filters/http/ringcache/ring_buffer_cache.h"
@@ -130,7 +131,10 @@ public:
 
       decoder_callbacks_->sendLocalReply(
           status_code, body_str,
-          [hdrs = std::move(cached_headers)](Http::ResponseHeaderMap& resp) mutable {
+          // std::function requires a copyable callable, so hold the cached
+          // headers via shared_ptr rather than move-capturing the unique_ptr.
+          [hdrs = std::shared_ptr<Http::ResponseHeaderMap>(std::move(cached_headers))](
+              Http::ResponseHeaderMap& resp) {
             hdrs->iterate([&resp](const Http::HeaderEntry& e) -> Http::HeaderMap::Iterate {
               // Skip pseudo-headers; sendLocalReply sets :status itself.
               const absl::string_view name = e.key().getStringView();

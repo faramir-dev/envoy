@@ -16,6 +16,7 @@
 #include "envoy/stats/stats_macros.h"
 
 #include "source/common/buffer/buffer_impl.h"
+#include "source/common/http/header_map_impl.h"
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
