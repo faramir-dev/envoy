@@ -45,60 +45,20 @@ sockets or starting workers.
 # Build the full binary with the extension linked in
 bazel build -c dbg --config=clang //source/exe:envoy-static
 
-# Validate a config that uses the filter (see example config below)
-bazel-bin/source/exe/envoy-static --mode validate -c /tmp/ringcache.yaml
+# Validate the example config that uses the filter
+bazel-bin/source/exe/envoy-static --mode validate -c configs/ringcache.yaml
 ```
 
-Expected output ends with `configuration '/tmp/ringcache.yaml' OK`. Typical
+Expected output ends with `configuration 'configs/ringcache.yaml' OK`. Typical
 failures at this stage: the extension not registered in
 `source/extensions/extensions_build_config.bzl` (unknown filter name), or a
 proto field mismatch (unknown/invalid field in `typed_config`).
 
 ## 3. Manual end-to-end test
 
-Save the following as `/tmp/ringcache.yaml`. It listens on `:10000`, proxies to
-a local backend on `:8000`, and exposes the admin endpoint on `:9901`:
-
-```yaml
-static_resources:
-  listeners:
-    - address:
-        socket_address: { address: 0.0.0.0, port_value: 10000 }
-      filter_chains:
-        - filters:
-            - name: envoy.filters.network.http_connection_manager
-              typed_config:
-                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                stat_prefix: ingress
-                route_config:
-                  virtual_hosts:
-                    - name: backend
-                      domains: ["*"]
-                      routes:
-                        - match: { prefix: "/" }
-                          route: { cluster: backend }
-                http_filters:
-                  - name: envoy.filters.http.ringcache
-                    typed_config:
-                      "@type": type.googleapis.com/envoy.extensions.filters.http.ringcache.v3.RingCacheConfig
-                      ttl: 60s
-                  - name: envoy.filters.http.router
-                    typed_config:
-                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-  clusters:
-    - name: backend
-      type: STRICT_DNS
-      load_assignment:
-        cluster_name: backend
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address: { address: 127.0.0.1, port_value: 8000 }
-admin:
-  address:
-    socket_address: { address: 127.0.0.1, port_value: 9901 }
-```
+The example configuration lives at [`configs/ringcache.yaml`](../../../../../configs/ringcache.yaml).
+It listens on `:10000`, proxies to a local backend on `:8000`, and exposes the
+admin endpoint on `:9901`. The ringcache filter is configured with a 60s TTL.
 
 Run each of these in its own terminal:
 
@@ -107,7 +67,7 @@ Run each of these in its own terminal:
 python3 -m http.server 8000
 
 # Terminal 2: Envoy, with ringcache debug logging
-bazel-bin/source/exe/envoy-static -c /tmp/ringcache.yaml -l debug 2>&1 | grep ringcache
+bazel-bin/source/exe/envoy-static -c configs/ringcache.yaml -l debug 2>&1 | grep ringcache
 
 # Terminal 3: exercise the cache
 curl -v http://localhost:10000/     # miss — forwarded upstream
