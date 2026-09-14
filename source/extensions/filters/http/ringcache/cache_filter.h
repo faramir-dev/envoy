@@ -96,6 +96,16 @@ public:
       return Http::FilterHeadersStatus::Continue;
     }
 
+    // Cookie-carrying requests are likewise bypassed. Cookies are almost
+    // always per-user state, and the default cache key does not include them,
+    // so caching could serve one user's personalized response to another.
+    // Operators that want per-cookie-key caching can add "cookie" to
+    // key_config.additional_headers instead.
+    if (!headers.get(Http::Headers::get().Cookie).empty()) {
+      is_cacheable_ = false;
+      return Http::FilterHeadersStatus::Continue;
+    }
+
     // Honor request cache-control: "no-cache" forbids serving from cache
     // without revalidation (which this filter cannot do), "no-store" forbids
     // storing the response. Conservative substring match on the directives.

@@ -92,7 +92,10 @@ curl -s http://localhost:9901/stats | grep ringcache
 # request always forwarded upstream.
 curl -H 'Authorization: Bearer x' http://localhost:10000/
 
-# no-cache skips the lookup: always counted as a miss, always forwarded.
+# Cookie-bearing requests also bypass the cache entirely (per-user state guard).
+curl -H 'Cookie: session=user-a' http://localhost:10000/
+
+# no-cache skips the lookup (no hit/miss counter change): always forwarded.
 curl -H 'Cache-Control: no-cache' http://localhost:10000/
 
 # Non-GET methods are never cached.

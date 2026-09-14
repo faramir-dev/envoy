@@ -626,6 +626,33 @@ TEST_F(CacheFilterTest, AuthorizationResponseNeverStored) {
   EXPECT_FALSE(lookupHits(plain));
 }
 
+TEST_F(CacheFilterTest, CookieRequestNeverServedFromCache) {
+  Http::TestRequestHeaderMapImpl plain{
+      {":method", "GET"}, {":path", "/doc"}, {":authority", "host"}};
+  runMissAndStore(plain, Http::TestResponseHeaderMapImpl{{":status", "200"}}, "public-content");
+  ASSERT_TRUE(lookupHits(plain));
+
+  Http::TestRequestHeaderMapImpl with_cookie{{":method", "GET"},
+                                             {":path", "/doc"},
+                                             {":authority", "host"},
+                                             {"cookie", "session=user-a"}};
+  EXPECT_FALSE(lookupHits(with_cookie));
+}
+
+TEST_F(CacheFilterTest, CookieResponseNeverStored) {
+  Http::TestRequestHeaderMapImpl with_cookie{{":method", "GET"},
+                                             {":path", "/profile"},
+                                             {":authority", "host"},
+                                             {"cookie", "session=user-a"}};
+  runMissAndStore(with_cookie, Http::TestResponseHeaderMapImpl{{":status", "200"}},
+                  "user-a-profile");
+
+  // The same key without cookies must still miss.
+  Http::TestRequestHeaderMapImpl plain{
+      {":method", "GET"}, {":path", "/profile"}, {":authority", "host"}};
+  EXPECT_FALSE(lookupHits(plain));
+}
+
 TEST_F(CacheFilterTest, RequestNoCacheSkipsLookup) {
   Http::TestRequestHeaderMapImpl plain{
       {":method", "GET"}, {":path", "/fresh"}, {":authority", "host"}};
@@ -715,6 +742,14 @@ TEST_F(CacheFilterTest, BypassedLookupsCountNeitherHitNorMiss) {
                                         {":authority", "host"},
                                         {"authorization", "Bearer tok"}};
   EXPECT_FALSE(lookupHits(authed));
+  EXPECT_EQ(store_->stats().hit_.value(), 0);
+  EXPECT_EQ(store_->stats().miss_.value(), 0);
+
+  Http::TestRequestHeaderMapImpl with_cookie{{":method", "GET"},
+                                             {":path", "/auth"},
+                                             {":authority", "host"},
+                                             {"cookie", "session=user-a"}};
+  EXPECT_FALSE(lookupHits(with_cookie));
   EXPECT_EQ(store_->stats().hit_.value(), 0);
   EXPECT_EQ(store_->stats().miss_.value(), 0);
 }
