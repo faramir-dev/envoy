@@ -213,8 +213,10 @@ public:
       return Http::FilterDataStatus::Continue;
     }
 
-    // Buffer slices from the upstream response; this does not copy data if
-    // slices can be referenced directly.
+    // Copy the upstream data into the filter's own buffer, leaving the
+    // upstream buffer intact for the rest of the encoder chain. The copy is
+    // bounded by the watermark guard above. put() later moves these slices
+    // zero-copy into the cache entry.
     accumulated_body_.add(data);
 
     if (end_stream && response_headers_ != nullptr) {
