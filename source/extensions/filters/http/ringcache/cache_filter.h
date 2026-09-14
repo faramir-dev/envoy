@@ -280,7 +280,9 @@ private:
   // Removes headers that must not be replayed with a cached body: framing
   // headers describe the original wire encoding (sendLocalReply computes its
   // own content-length for the replayed body), and hop-by-hop headers describe
-  // the original connection, not the cached response.
+  // the original connection, not the cached response. Trailer is dropped as
+  // well: a cached replay cannot include trailers, so the header would be a
+  // false promise.
   static void sanitizeStoredHeaders(Http::ResponseHeaderMap& headers) {
     const auto& names = Http::Headers::get();
     headers.remove(names.ContentLength);
@@ -290,6 +292,7 @@ private:
     headers.remove(names.ProxyConnection);
     headers.remove(names.ProxyAuthenticate);
     headers.remove(names.Upgrade);
+    headers.remove(Http::LowerCaseString("trailer"));
   }
 
   std::shared_ptr<CacheFilterConfig> config_;

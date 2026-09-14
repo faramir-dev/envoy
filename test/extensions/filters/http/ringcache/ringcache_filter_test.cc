@@ -512,6 +512,7 @@ TEST_F(CacheFilterTest, ReplayStripsFramingAndHopByHopHeaders) {
                                             {"connection", "keep-alive"},
                                             {"keep-alive", "timeout=5"},
                                             {"upgrade", "h2c"},
+                                            {"trailer", "x-checksum"},
                                             {"etag", "\"abc\""}};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(resp_hdrs, false));
 
@@ -537,6 +538,7 @@ TEST_F(CacheFilterTest, ReplayStripsFramingAndHopByHopHeaders) {
             EXPECT_TRUE(reply.get(Http::LowerCaseString("connection")).empty());
             EXPECT_TRUE(reply.get(Http::LowerCaseString("keep-alive")).empty());
             EXPECT_TRUE(reply.get(Http::LowerCaseString("upgrade")).empty());
+            EXPECT_TRUE(reply.get(Http::LowerCaseString("trailer")).empty());
           })));
 
   Http::TestRequestHeaderMapImpl req2{{":method", "GET"},
