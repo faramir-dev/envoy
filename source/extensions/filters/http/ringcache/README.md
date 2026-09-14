@@ -84,6 +84,9 @@ curl -s http://localhost:9901/stats | grep ringcache
 - Stats on the admin endpoint track your requests:
   `ringcache.hit`, `ringcache.miss`, `ringcache.insert`,
   `ringcache.insert_rejected`, `ringcache.eviction`, `ringcache.expired`.
+  `ringcache.hit` and `ringcache.miss` are only incremented when a cache
+  lookup actually runs: bypassed requests (`Authorization` or `Cookie`) and
+  skipped lookups (`cache-control: no-cache`) change neither counter.
 
 ### Behavior checks
 
