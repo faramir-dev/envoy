@@ -47,6 +47,9 @@ struct RingCacheStats {
 };
 
 struct CachedResponse {
+  // Once an entry is inserted into a partition it is never mutated (only
+  // replaced or erased), so readers may copy from it without holding the
+  // partition lock as long as they hold a shared_ptr to it.
   Http::ResponseHeaderMapPtr headers;
   Buffer::OwnedImpl body;
   // Full accounted footprint: body length + headers byteSize() + key length.
@@ -70,6 +73,7 @@ public:
   // body to the caller-supplied output parameters. Returns true on hit.
   bool get(const std::string& key, Http::ResponseHeaderMapPtr& out_headers,
            Buffer::Instance& out_body) {
+    std::shared_ptr<CachedResponse> entry;
     {
       absl::ReaderMutexLock lock(&mu_);
       auto it = lookup_.find(key);
@@ -77,14 +81,20 @@ public:
         return false;
       }
       if (!isExpired(*it->second)) {
-        const auto& entry = *it->second;
-        out_headers = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(*entry.headers);
-        // Copy slices from the cached buffer — a reader lock is held so the
-        // entry cannot be evicted while we copy.
-        out_body.add(entry.body);
-        return true;
+        entry = it->second;
       }
     }
+
+    if (entry != nullptr) {
+      // The entry is immutable after insertion and held by shared_ptr, so it
+      // remains valid (and its headers/body cannot change) even if a
+      // concurrent put() evicts the key. Copy the response outside the lock
+      // to keep the reader critical section short.
+      out_headers = Http::createHeaderMap<Http::ResponseHeaderMapImpl>(*entry->headers);
+      out_body.add(entry->body);
+      return true;
+    }
+
     // The entry expired: erase it under the writer lock so its budget is
     // reclaimed. Re-check expiry because a concurrent put() may have replaced
     // the entry between the two lock scopes.
