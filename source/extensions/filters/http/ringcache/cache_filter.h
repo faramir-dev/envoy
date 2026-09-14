@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -157,7 +158,7 @@ public:
               return Http::HeaderMap::Iterate::Continue;
             });
           },
-          absl::nullopt, "cache_hit");
+          std::nullopt, "cache_hit");
       return Http::FilterHeadersStatus::StopIteration;
     }
 
