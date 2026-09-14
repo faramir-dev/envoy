@@ -82,7 +82,9 @@ public:
 
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& headers,
                                           bool /*end_stream*/) override {
-    // Only cache idempotent GET requests.
+    // Only cache idempotent GET requests. Note that this comparison is
+    // case-sensitive: an HTTP/1.1 request with a lowercase method (e.g.
+    // "get") silently bypasses the cache.
     if (headers.getMethodValue() != Http::Headers::get().MethodValues.Get) {
       is_cacheable_ = false;
       return Http::FilterHeadersStatus::Continue;

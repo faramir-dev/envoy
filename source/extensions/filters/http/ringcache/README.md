@@ -101,6 +101,10 @@ curl -H 'Cache-Control: no-cache' http://localhost:10000/
 # Non-GET methods are never cached.
 curl -X POST http://localhost:10000/
 
+# Lowercase HTTP/1.1 methods (e.g. "get") are also never cached: the method
+# comparison is case-sensitive and only matches uppercase "GET".
+curl -X get http://localhost:10000/
+
 # TTL expiry: after the configured ttl (60s above) the next request
 # increments ringcache.expired and ringcache.miss, then re-caches.
 sleep 61 && curl http://localhost:10000/
