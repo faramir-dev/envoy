@@ -1,4 +1,4 @@
-FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 as debian-base
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 as debian-base
 
 
 FROM envoyproxy/envoy:distroless-dev as distroless-dev
