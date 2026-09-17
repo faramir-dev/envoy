@@ -1,6 +1,7 @@
 #include "source/extensions/filters/http/ringcache/config.h"
 
 #include <chrono>
+#include <optional>
 
 #include "envoy/registry/registry.h"
 #include "envoy/singleton/manager.h"
@@ -43,7 +44,7 @@ RingCacheFilterFactory::createHttpFilterFactoryFromProtoTyped(
                                                 ? proto_config.max_cacheable_body_bytes().value()
                                                 : kDefaultMaxCacheableBodyBytes;
 
-  absl::optional<std::chrono::milliseconds> ttl;
+  std::optional<std::chrono::milliseconds> ttl;
   if (proto_config.has_ttl()) {
     auto ttl_ms = DurationUtil::durationToMillisecondsNoThrow(proto_config.ttl());
     if (!ttl_ms.ok()) {

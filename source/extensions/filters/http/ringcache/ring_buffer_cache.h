@@ -5,6 +5,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,7 +21,6 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
-#include "absl/types/optional.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -65,7 +65,7 @@ struct CachedResponse {
 class RingBufferPartition {
 public:
   RingBufferPartition(size_t max_bytes, TimeSource& time_source,
-                      absl::optional<std::chrono::milliseconds> ttl, RingCacheStats& stats)
+                      std::optional<std::chrono::milliseconds> ttl, RingCacheStats& stats)
       : max_bytes_(max_bytes), time_source_(time_source), ttl_(ttl), stats_(stats),
         current_bytes_(0) {}
 
@@ -178,7 +178,7 @@ private:
 
   const size_t max_bytes_;
   TimeSource& time_source_;
-  const absl::optional<std::chrono::milliseconds> ttl_;
+  const std::optional<std::chrono::milliseconds> ttl_;
   RingCacheStats& stats_;
   size_t current_bytes_ ABSL_GUARDED_BY(mu_);
   mutable absl::Mutex mu_;
@@ -192,7 +192,7 @@ private:
 class SharedCacheStore {
 public:
   SharedCacheStore(size_t num_partitions, size_t partition_max_bytes,
-                   absl::optional<std::chrono::milliseconds> ttl, TimeSource& time_source,
+                   std::optional<std::chrono::milliseconds> ttl, TimeSource& time_source,
                    Stats::Scope& scope)
       : stats_(RingCacheStats::generate(scope)) {
     partitions_.reserve(num_partitions);
