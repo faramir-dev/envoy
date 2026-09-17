@@ -164,7 +164,12 @@ public:
       return Http::FilterHeadersStatus::StopIteration;
     }
 
-    ENVOY_LOG(debug, "ringcache: miss for key '{}'", cache_key_);
+    if (skip_lookup) {
+      ENVOY_LOG(debug, "ringcache: lookup skipped for key '{}' (request cache-control: no-cache)",
+                cache_key_);
+    } else {
+      ENVOY_LOG(debug, "ringcache: miss for key '{}'", cache_key_);
+    }
     is_cacheable_ = !skip_store;
     return Http::FilterHeadersStatus::Continue;
   }
